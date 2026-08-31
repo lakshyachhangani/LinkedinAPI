@@ -1,170 +1,117 @@
 import { describe, expect, it, vi } from "vitest";
-import { chromium, type Browser, type BrowserContext, type Response, type Route } from "playwright";
 import { loadConfig } from "../src/config.js";
-import {
-  LinkedInScraper,
-  VoyagerCollector,
-  isAllowedBrowserRequest,
-  samePath
-} from "../src/extractor/linkedin-scraper.js";
+import { LinkedInScraper, normalizeJsessionId } from "../src/extractor/linkedin-scraper.js";
 
-function response(overrides: {
-  url?: string;
-  ok?: boolean;
-  contentType?: string;
-  contentLength?: number;
-  body?: string;
-} = {}): Response {
-  const body = Buffer.from(overrides.body ?? '{"included":[{"firstName":"Jane"}]}');
-  return {
-    url: () => overrides.url ?? "https://www.linkedin.com/voyager/api/identity/profiles/jane",
-    ok: () => overrides.ok ?? true,
-    headers: () => ({
-      "content-type": overrides.contentType ?? "application/json; charset=utf-8",
-      "content-length": String(overrides.contentLength ?? body.byteLength)
-    }),
-    body: () => Promise.resolve(body)
-  } as unknown as Response;
+const profilePayload = {
+  included: [
+    {
+      $type: "com.linkedin.voyager.identity.profile.Profile",
+      entityUrn: "urn:li:fsd_profile:ACoTarget",
+      publicIdentifier: "jane-doe",
+      firstName: "Jane",
+      lastName: "Doe",
+      headline: "Staff Engineer"
+    }
+  ]
+};
+
+function config(overrides: NodeJS.ProcessEnv = {}) {
+  return loadConfig({
+    NODE_ENV: "test",
+    API_KEYS: "test-key",
+    LINKEDIN_LI_AT: "authorized-session-cookie-value",
+    LINKEDIN_JSESSIONID: '"ajax:123456"',
+    SCRAPE_TIMEOUT_MS: "5000",
+    MAX_RETRIES: "0",
+    ...overrides
+  });
 }
 
-describe("browser egress policy", () => {
-  it.each([
-    "https://www.linkedin.com/in/jane-doe/",
-    "https://media.licdn.com/dms/image/example",
-    "https://static-exp1.licdn.com/sc/h/example.js",
-    "about:blank",
-    "blob:https://www.linkedin.com/id",
-    "data:text/plain,fixture"
-  ])("allows %s", (url) => {
-    expect(isAllowedBrowserRequest(url)).toBe(true);
+describe("LinkedInScraper direct Voyager client", () => {
+  it("calls only fixed LinkedIn identity endpoints with the required session headers", async () => {
+    const request = vi.fn((_input: string | URL | Request, init?: RequestInit) => {
+      const headers = init?.headers as Headers;
+      expect(headers.get("csrf-token")).toBe("ajax:123456");
+      expect(headers.get("cookie")).toContain("li_at=authorized-session-cookie-value");
+      expect(headers.get("x-restli-protocol-version")).toBe("2.0.0");
+      return Promise.resolve(
+        new Response(JSON.stringify(profilePayload), {
+          status: 200,
+          headers: { "content-type": "application/json" }
+        })
+      );
+    });
+    const scraper = new LinkedInScraper(config(), request);
+
+    const result = await scraper.scrape("https://www.linkedin.com/in/jane-doe/");
+
+    expect(result.profile.name).toBe("Jane Doe");
+    expect(result.extractionMode).toBe("authenticated");
+    expect(request).toHaveBeenCalledTimes(7);
+    for (const [input, init] of request.mock.calls) {
+      const url = input instanceof URL ? input : new URL(input instanceof Request ? input.url : input);
+      expect(url.origin).toBe("https://www.linkedin.com");
+      expect(url.pathname).toMatch(/^\/voyager\/api\/identity\//);
+      expect(init?.redirect).toBe("error");
+    }
+  });
+
+  it("keeps optional endpoint failures as warnings", async () => {
+    let calls = 0;
+    const request = vi.fn(() => {
+      calls += 1;
+      return Promise.resolve(
+        calls === 1
+          ? new Response(JSON.stringify(profilePayload), { status: 200 })
+          : new Response("not found", { status: 404 })
+      );
+    });
+    const scraper = new LinkedInScraper(config(), request);
+
+    const result = await scraper.scrape("https://www.linkedin.com/in/jane-doe/");
+
+    expect(result.profile.name).toBe("Jane Doe");
+    expect(result.warnings).toContain("skills endpoint was unavailable to the configured LinkedIn session");
   });
 
   it.each([
-    "http://www.linkedin.com/in/jane-doe/",
-    "https://linkedin.example/in/jane-doe/",
-    "https://evillicdn.com/asset.js",
-    "file:///etc/passwd",
-    "not a url"
-  ])("blocks %s", (url) => {
-    expect(isAllowedBrowserRequest(url)).toBe(false);
+    [401, "LINKEDIN_SESSION_EXPIRED"],
+    [429, "LINKEDIN_BLOCKED"],
+    [404, "PROFILE_NOT_FOUND"],
+    [503, "UPSTREAM_ERROR"]
+  ])("maps HTTP %s to %s", async (status, code) => {
+    const request = vi.fn(() => Promise.resolve(new Response("upstream", { status })));
+    const scraper = new LinkedInScraper(config(), request);
+    await expect(scraper.scrape("https://www.linkedin.com/in/jane-doe/")).rejects.toMatchObject({ code });
   });
 
-  it("compares normalized LinkedIn detail paths", () => {
-    expect(
-      samePath(
-        "https://www.linkedin.com/in/jane-doe/details/experience/?trk=test",
-        "https://www.linkedin.com/in/jane-doe/details/experience/"
+  it("rejects oversized and malformed endpoint responses", async () => {
+    const oversized = new LinkedInScraper(
+      config(),
+      vi.fn(() =>
+        Promise.resolve(new Response("{}", { status: 200, headers: { "content-length": "2000001" } }))
       )
-    ).toBe(true);
-    expect(
-      samePath(
-        "https://www.linkedin.com/in/jane-doe/details/education/",
-        "https://www.linkedin.com/in/jane-doe/details/experience/"
-      )
-    ).toBe(false);
-  });
-});
-
-describe("LinkedInScraper browser lifecycle", () => {
-  it("launches Chromium, validates a context, and applies the request allowlist", async () => {
-    let routeHandler: ((route: Route) => Promise<void>) | undefined;
-    const addCookies = vi.fn(() => Promise.resolve());
-    const contextClose = vi.fn(() => Promise.resolve());
-    const context = {
-      addCookies,
-      route: vi.fn((_pattern: string, handler: (route: Route) => Promise<void>) => {
-        routeHandler = handler;
-        return Promise.resolve();
-      }),
-      close: contextClose
-    } as unknown as BrowserContext;
-    const browserClose = vi.fn(() => Promise.resolve());
-    const browser = {
-      newContext: vi.fn(() => Promise.resolve(context)),
-      isConnected: vi.fn(() => true),
-      once: vi.fn(),
-      close: browserClose
-    } as unknown as Browser;
-    const launch = vi.spyOn(chromium, "launch").mockResolvedValue(browser);
-    const scraper = new LinkedInScraper(
-      loadConfig({
-        NODE_ENV: "test",
-        API_KEYS: "test-key",
-        LINKEDIN_LI_AT: "authorized-cookie-value",
-        AUTHENTICATED_MODE_ENABLED: "true",
-        SCRAPE_TIMEOUT_MS: "5000"
-      })
     );
+    await expect(oversized.scrape("https://www.linkedin.com/in/jane-doe/")).rejects.toMatchObject({
+      code: "UPSTREAM_ERROR"
+    });
 
-    await scraper.checkReady();
-    expect(launch).toHaveBeenCalledWith({ headless: true, args: ["--disable-dev-shm-usage"] });
-    expect(addCookies).toHaveBeenCalledOnce();
-    expect(contextClose).toHaveBeenCalledOnce();
-
-    const abort = vi.fn(() => Promise.resolve());
-    const continueRequest = vi.fn(() => Promise.resolve());
-    await routeHandler?.({
-      request: () => ({ url: () => "https://media.licdn.com/font.woff2" }),
-      abort,
-      continue: continueRequest
-    } as unknown as Route);
-    expect(abort).toHaveBeenCalledOnce();
-
-    await routeHandler?.({
-      request: () => ({ url: () => "https://www.linkedin.com/voyager/api/graphql" }),
-      abort,
-      continue: continueRequest
-    } as unknown as Route);
-    expect(continueRequest).toHaveBeenCalledOnce();
-
-    await scraper.close();
-    expect(browserClose).toHaveBeenCalledOnce();
-  });
-
-  it("normalizes browser startup failures", async () => {
-    vi.spyOn(chromium, "launch").mockRejectedValue(new Error("binary missing"));
-    const scraper = new LinkedInScraper(
-      loadConfig({ NODE_ENV: "test", API_KEYS: "test-key", SCRAPE_TIMEOUT_MS: "5000" })
+    const malformed = new LinkedInScraper(
+      config(),
+      vi.fn(() => Promise.resolve(new Response("not-json", { status: 200 })))
     );
-
-    await expect(scraper.checkReady()).rejects.toMatchObject({
-      code: "UPSTREAM_ERROR",
-      statusCode: 503,
-      retryable: true
+    await expect(malformed.scrape("https://www.linkedin.com/in/jane-doe/")).rejects.toMatchObject({
+      code: "UPSTREAM_ERROR"
     });
   });
-});
 
-describe("VoyagerCollector", () => {
-  it("captures only bounded JSON payloads from expected LinkedIn endpoints", async () => {
-    const collector = new VoyagerCollector();
-    collector.capture(response());
-    collector.capture(response({ url: "https://www.linkedin.com/voyager/api/graphql?queryId=example" }));
-    collector.capture(response({ url: "https://example.com/voyager/api/identity/profile" }));
-    collector.capture(response({ url: "https://www.linkedin.com/voyager/api/feed/updates" }));
-    collector.capture(response({ ok: false }));
-    collector.capture(response({ contentType: "text/html" }));
-    collector.capture(response({ contentLength: 2_000_001 }));
-
-    const payloads = await collector.drain();
-    expect(payloads).toHaveLength(2);
-    expect(payloads[0]).toMatchObject({ included: [{ firstName: "Jane" }] });
+  it("fails readiness when endpoint session cookies are absent", () => {
+    const scraper = new LinkedInScraper(loadConfig({ NODE_ENV: "test", API_KEYS: "test-key" }));
+    expect(() => scraper.checkReady()).toThrow(/LINKEDIN_LI_AT and LINKEDIN_JSESSIONID/);
   });
 
-  it("ignores malformed and oversized response bodies", async () => {
-    const collector = new VoyagerCollector();
-    collector.capture(response({ body: "not-json" }));
-    collector.capture(response({ body: "x".repeat(2_000_001), contentLength: 0 }));
-
-    await expect(collector.drain()).resolves.toEqual([]);
-  });
-
-  it("caps the number of accepted upstream responses", async () => {
-    const collector = new VoyagerCollector();
-    for (let index = 0; index < 20; index += 1) {
-      collector.capture(response({ body: JSON.stringify({ index }) }));
-    }
-
-    await expect(collector.drain()).resolves.toHaveLength(10);
+  it("normalizes quoted JSESSIONID cookie values", () => {
+    expect(normalizeJsessionId('"ajax:123"')).toBe("ajax:123");
+    expect(normalizeJsessionId("ajax:456")).toBe("ajax:456");
   });
 });

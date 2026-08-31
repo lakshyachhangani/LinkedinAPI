@@ -10,18 +10,9 @@ const envSchema = z.object({
   LOG_LEVEL: z.enum(["fatal", "error", "warn", "info", "debug", "trace", "silent"]).default("info"),
   TRUST_PROXY_HOPS: integerFromString(0, 0, 5),
   API_KEYS: z.string().default(""),
-  AUTHENTICATED_MODE_ENABLED: z
-    .enum(["true", "false"])
-    .default("false")
-    .transform((value) => value === "true"),
   LINKEDIN_LI_AT: z.string().min(20).optional().or(z.literal("")),
-  BROWSER_HEADLESS: z
-    .enum(["true", "false"])
-    .default("true")
-    .transform((value) => value === "true"),
-  BROWSER_EXECUTABLE_PATH: z.string().optional().or(z.literal("")),
+  LINKEDIN_JSESSIONID: z.string().min(3).optional().or(z.literal("")),
   SCRAPE_TIMEOUT_MS: integerFromString(45_000, 5_000, 120_000),
-  NAVIGATION_TIMEOUT_MS: integerFromString(20_000, 3_000, 60_000),
   SCRAPE_CONCURRENCY: integerFromString(2, 1, 10),
   SCRAPE_QUEUE_MAX: integerFromString(20, 0, 1_000),
   CACHE_TTL_SECONDS: integerFromString(3_600, 0, 86_400),
@@ -49,8 +40,8 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env) {
   ) {
     throw new Error("Every production API key must be an unpredictable value of at least 32 characters");
   }
-  if (parsed.AUTHENTICATED_MODE_ENABLED && !parsed.LINKEDIN_LI_AT) {
-    throw new Error("LINKEDIN_LI_AT is required when AUTHENTICATED_MODE_ENABLED=true");
+  if (parsed.NODE_ENV === "production" && (!parsed.LINKEDIN_LI_AT || !parsed.LINKEDIN_JSESSIONID)) {
+    throw new Error("LINKEDIN_LI_AT and LINKEDIN_JSESSIONID are required in production");
   }
 
   return {
@@ -60,12 +51,9 @@ export function loadConfig(environment: NodeJS.ProcessEnv = process.env) {
     logLevel: parsed.LOG_LEVEL,
     trustProxyHops: parsed.TRUST_PROXY_HOPS,
     apiKeys,
-    linkedInLiAt:
-      parsed.AUTHENTICATED_MODE_ENABLED && parsed.LINKEDIN_LI_AT !== "" ? parsed.LINKEDIN_LI_AT : undefined,
-    browserHeadless: parsed.BROWSER_HEADLESS,
-    browserExecutablePath: parsed.BROWSER_EXECUTABLE_PATH === "" ? undefined : parsed.BROWSER_EXECUTABLE_PATH,
+    linkedInLiAt: parsed.LINKEDIN_LI_AT === "" ? undefined : parsed.LINKEDIN_LI_AT,
+    linkedInJsessionId: parsed.LINKEDIN_JSESSIONID === "" ? undefined : parsed.LINKEDIN_JSESSIONID,
     scrapeTimeoutMs: parsed.SCRAPE_TIMEOUT_MS,
-    navigationTimeoutMs: parsed.NAVIGATION_TIMEOUT_MS,
     scrapeConcurrency: parsed.SCRAPE_CONCURRENCY,
     scrapeQueueMax: parsed.SCRAPE_QUEUE_MAX,
     cacheTtlSeconds: parsed.CACHE_TTL_SECONDS,

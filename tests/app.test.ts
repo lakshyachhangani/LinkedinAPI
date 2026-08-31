@@ -148,10 +148,10 @@ describe("POST /v1/profiles", () => {
     expect(invalidJson.json<{ error: { code: string } }>().error.code).toBe("INVALID_REQUEST");
   });
 
-  it("reports browser readiness failures without failing liveness", async () => {
+  it("reports endpoint-client readiness failures without failing liveness", async () => {
     const scraper: ProfileScraper = {
       scrape: () => Promise.reject(new Error("not used")),
-      checkReady: () => Promise.reject(new Error("Chromium unavailable")),
+      checkReady: () => Promise.reject(new Error("LinkedIn session unavailable")),
       close: () => Promise.resolve()
     };
     const { app } = await setup("test-key", scraper);
@@ -186,10 +186,14 @@ describe("configuration", () => {
     expect(() => loadConfig({ NODE_ENV: "production", API_KEYS: "" })).toThrow(/API_KEYS/);
   });
 
-  it("rejects weak production keys and incomplete authenticated mode", () => {
+  it("rejects weak production keys and missing endpoint session cookies", () => {
     expect(() => loadConfig({ NODE_ENV: "production", API_KEYS: "too-short" })).toThrow(/32 characters/);
     expect(() =>
-      loadConfig({ NODE_ENV: "test", API_KEYS: "", AUTHENTICATED_MODE_ENABLED: "true", LINKEDIN_LI_AT: "" })
-    ).toThrow(/LINKEDIN_LI_AT/);
+      loadConfig({
+        NODE_ENV: "production",
+        API_KEYS: "this-is-a-valid-production-api-key-value",
+        LINKEDIN_LI_AT: "authorized-session-cookie-value"
+      })
+    ).toThrow(/LINKEDIN_JSESSIONID/);
   });
 });

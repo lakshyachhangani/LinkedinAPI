@@ -25,8 +25,6 @@ jobs:
           cache: true
           install: false
       - run: pnpm install --frozen-lockfile
-        env:
-          PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: "1"
       - run: pnpm check
 
   container:
@@ -50,6 +48,8 @@ jobs:
           docker run --detach --name linkedin-profile-api-ci \
             --env NODE_ENV=production \
             --env API_KEYS="$API_KEY" \
+            --env LINKEDIN_LI_AT="ci-placeholder-session-cookie" \
+            --env LINKEDIN_JSESSIONID="ajax:ci-placeholder" \
             --publish 127.0.0.1:3000:3000 \
             linkedin-profile-api:ci
           trap 'docker logs linkedin-profile-api-ci; docker rm --force linkedin-profile-api-ci' EXIT

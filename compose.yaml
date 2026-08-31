@@ -7,7 +7,6 @@ services:
       NODE_ENV: production
     ports:
       - "127.0.0.1:3000:3000"
-    shm_size: "1gb"
     read_only: true
     tmpfs:
       - /tmp:size=256m,mode=1777

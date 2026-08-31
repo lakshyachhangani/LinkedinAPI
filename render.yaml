@@ -2,7 +2,7 @@ services:
   - type: web
     name: linkedin-profile-api
     runtime: docker
-    plan: 1c-2g
+    plan: free
     autoDeployTrigger: checksPass
     dockerfilePath: ./Dockerfile
     healthCheckPath: /health/ready
@@ -11,8 +11,10 @@ services:
         value: production
       - key: API_KEYS
         generateValue: true
-      - key: AUTHENTICATED_MODE_ENABLED
-        value: "false"
+      - key: LINKEDIN_LI_AT
+        sync: false
+      - key: LINKEDIN_JSESSIONID
+        sync: false
       - key: TRUST_PROXY_HOPS
         value: "1"
       - key: SCRAPE_CONCURRENCY
@@ -23,5 +25,3 @@ services:
         value: "3600"
       - key: CACHE_MAX_VALUE_BYTES
         value: "524288"
-      - key: BROWSER_HEADLESS
-        value: "true"

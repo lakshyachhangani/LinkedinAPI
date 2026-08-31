@@ -77,7 +77,7 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
       info: {
         title: "LinkedIn Profile API",
         version: "1.0.0",
-        description: "Extract structured profile data visible to a configured LinkedIn browser session."
+        description: "Extract structured profile data through reverse-engineered LinkedIn Voyager HTTP endpoints."
       },
       components: {
         securitySchemes: { apiKey: { type: "apiKey", in: "header", name: "X-API-Key" } }
